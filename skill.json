@@ -1,0 +1,106 @@
+{
+  "name": "SafeMailSkill",
+  "version": "1.0.0",
+  "description": "Safe, human-in-the-loop email management for Fastmail via JMAP. Provides shadow-delete and PIN-gated send capabilities so an AI agent never sends email without explicit human approval.",
+  "base_url": "http://localhost:8000",
+  "auth": {
+    "type": "none"
+  },
+  "tools": [
+    {
+      "name": "delete_email",
+      "description": "Moves an email to the ai_trash folder instead of permanently deleting it. The email is recoverable and the action is fully auditable.",
+      "method": "POST",
+      "path": "/v1/delete",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "email_id": {
+            "type": "string",
+            "description": "The JMAP Email ID of the message to shadow-delete."
+          }
+        },
+        "required": ["email_id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "\"success\" on success."
+          },
+          "email_id": {
+            "type": "string",
+            "description": "The ID of the email that was moved to ai_trash."
+          }
+        }
+      }
+    },
+    {
+      "name": "send_email",
+      "description": "Stages an outgoing email as a draft in the ai_outgoing folder and sends a PIN notification to the human owner. The email will NOT be sent until the human approves it with the correct PIN via the approve_send tool. Always use this instead of sending email directly.",
+      "method": "POST",
+      "path": "/v1/send",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string",
+            "description": "Recipient email address."
+          },
+          "subject": {
+            "type": "string",
+            "description": "Email subject line."
+          },
+          "body": {
+            "type": "string",
+            "description": "Plain-text email body."
+          }
+        },
+        "required": ["to", "subject", "body"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "\"pending\" – awaiting human approval."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable status message."
+          }
+        }
+      }
+    },
+    {
+      "name": "approve_send",
+      "description": "Approves and sends a staged email draft using a 4-digit PIN previously sent to the human via notification. The PIN expires after 1 hour. If the PIN is wrong or expired, the request is rejected.",
+      "method": "POST",
+      "path": "/v1/approve",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "pin": {
+            "type": "string",
+            "description": "The 4-digit numeric PIN received via push notification."
+          }
+        },
+        "required": ["pin"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "\"success\" when the email was sent."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable result message."
+          }
+        }
+      }
+    }
+  ]
+}
