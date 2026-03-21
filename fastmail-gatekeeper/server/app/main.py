@@ -1,6 +1,7 @@
 import logging
 import os
 import random
+import sys
 from contextlib import asynccontextmanager
 
 import httpx
@@ -8,7 +9,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from .auth import require_api_key
-from .config import settings
+from .config import check_startup_config, settings
 from .jmap_client import (
     create_draft,
     find_draft_by_pin,
@@ -24,6 +25,56 @@ from .schemas import ApproveRequest, DeleteRequest, JMAPProxyRequest, SendReques
 
 logger = logging.getLogger(__name__)
 
+_SEP = "=" * 70
+
+
+async def _print_mailbox_setup_help() -> None:
+    """Fetch the user's Fastmail mailbox list and print setup instructions."""
+    headers = {
+        "Authorization": f"Bearer {settings.fastmail_token}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(settings.fastmail_jmap_session_url, headers=headers)
+            r.raise_for_status()
+            session = r.json()
+            api_url = session["apiUrl"]
+            account_id = session["primaryAccounts"]["urn:ietf:params:jmap:mail"]
+
+            r = await client.post(api_url, headers=headers, json={
+                "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+                "methodCalls": [["Mailbox/get", {"accountId": account_id, "ids": None}, "c1"]],
+            })
+            r.raise_for_status()
+            mailboxes: list = r.json()["methodResponses"][0][1]["list"]
+            mailboxes.sort(key=lambda m: (m.get("role") or "z", m["name"].lower()))
+
+        print(f"\n{_SEP}")
+        print(" SETUP REQUIRED — AI_TRASH_ID or AI_OUTGOING_ID is not set")
+        print(f"{_SEP}\n")
+        print(f"  Account ID : {account_id}\n")
+        print(f"  {'NAME':<35} {'ROLE':<15} ID")
+        print(f"  {'-'*80}")
+        for mb in mailboxes:
+            role = mb.get("role") or ""
+            note = "  ← AI_TRASH_ID?" if role == "trash" else ""
+            print(f"  {mb['name']:<35} {role:<15} {mb['id']}{note}")
+        print()
+        print("  Create 'ai_trash' and 'ai_outgoing' folders in Fastmail if they")
+        print("  don't exist, then set these in your .env file (or -e flags):\n")
+        print("    AI_TRASH_ID=<id of your ai_trash mailbox>")
+        print("    AI_OUTGOING_ID=<id of your ai_outgoing mailbox>")
+        print(f"\n{_SEP}\n", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"\n{_SEP}")
+        print(" SETUP REQUIRED — AI_TRASH_ID or AI_OUTGOING_ID is not set")
+        print(f"{_SEP}\n")
+        print(f"  Could not fetch mailbox list automatically: {exc}")
+        print("  Run:  FASTMAIL_TOKEN=<token> python scripts/list_mailboxes.py")
+        print("  Then set AI_TRASH_ID and AI_OUTGOING_ID in your .env file.")
+        print(f"\n{_SEP}\n", flush=True)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -32,6 +83,16 @@ async def lifespan(app: FastAPI):
         logger.info("Startup credential validation skipped (SKIP_STARTUP_VALIDATION is set)")
         yield
         return
+
+    # ── Check for missing operator config before hitting Fastmail ────────────
+    missing = check_startup_config(settings)
+    if "AI_TRASH_ID" in missing or "AI_OUTGOING_ID" in missing:
+        await _print_mailbox_setup_help()
+        sys.exit(0)
+    if missing:
+        for var in missing:
+            logger.error("Required env var %s is not set — add it to your .env file.", var)
+        sys.exit(1)
 
     try:
         session = await get_session()
