@@ -134,12 +134,12 @@ jobs:
         run: |
           curl -sf http://localhost:8080/health | grep -q '"status":"ok"'
 
-      - name: Unauthenticated request returns 403
+      - name: Unauthenticated request returns 401
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:8080/v1/jmap \
             -H "Content-Type: application/json" \
             -d '{"methodCalls":[["Mailbox/get",{},"a"]]}')
-          [ "$STATUS" = "403" ]
+          [ "$STATUS" = "401" ]
 
       - name: Authenticated request reaches policy layer (Email/destroy blocked → 403)
         run: |
