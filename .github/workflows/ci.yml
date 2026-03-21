@@ -7,6 +7,9 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/fastmail-gatekeeper
+
 jobs:
   test:
     name: Unit tests
@@ -36,31 +39,32 @@ jobs:
     name: Build & push Docker image
     runs-on: ubuntu-latest
     needs: test
-    # Only push on main branch or version tags; PRs only build
     permissions:
       contents: read
+      packages: write
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Log in to GitLab container registry
+      - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
-          registry: ${{ secrets.GITLAB_REGISTRY }}
-          username: ${{ secrets.GITLAB_REGISTRY_USER }}
-          password: ${{ secrets.GITLAB_REGISTRY_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.GITLAB_REGISTRY }}/${{ secrets.GITLAB_IMAGE_PATH }}
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
 
       - name: Set up Docker Buildx
@@ -81,12 +85,23 @@ jobs:
     name: Sanity test (deployed image)
     runs-on: ubuntu-latest
     needs: build-and-push
-    # Only runs on main/tag pushes where the image was actually published
     if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: read
 
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
       - name: Pull image
-        run: docker pull ${{ secrets.GITLAB_REGISTRY }}/${{ secrets.GITLAB_IMAGE_PATH }}:sha-$(echo ${{ github.sha }} | cut -c1-7)
+        run: docker pull "${IMAGE_NAME}:sha-${GITHUB_SHA::7}"
 
       - name: Start container
         run: |
@@ -98,7 +113,7 @@ jobs:
             -e NTFY_TOPIC=dummy \
             -e GATEKEEPER_API_KEY=sanity-key \
             -e SKIP_STARTUP_VALIDATION=1 \
-            ${{ secrets.GITLAB_REGISTRY }}/${{ secrets.GITLAB_IMAGE_PATH }}:sha-$(echo ${{ github.sha }} | cut -c1-7)
+            "${IMAGE_NAME}:sha-${GITHUB_SHA::7}"
 
       - name: Wait for container to be healthy
         run: |
