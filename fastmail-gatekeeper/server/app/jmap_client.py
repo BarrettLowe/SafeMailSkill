@@ -125,7 +125,7 @@ async def move_to_folder(message_id: str, folder_id: str) -> None:
     responses = result.get("methodResponses", [])
     if not responses or len(responses[0]) < 2 or not isinstance(responses[0][1], dict):
         raise RuntimeError("Unexpected JMAP response structure from Email/set")
-    not_updated: dict = responses[0][1].get("notUpdated", {})
+    not_updated: dict = responses[0][1].get("notUpdated") or {}
     if message_id in not_updated:
         raise RuntimeError(f"JMAP notUpdated: {not_updated[message_id]}")
 
@@ -180,7 +180,7 @@ async def create_draft(to: str, subject: str, body: str, pin: str) -> str:
     resp_args = result["methodResponses"][0][1]
     created = resp_args.get("created", {})
     if "draft1" not in created:
-        not_created = resp_args.get("notCreated", {})
+        not_created = resp_args.get("notCreated") or {}
         raise RuntimeError(
             f"Draft creation failed: {not_created.get('draft1', resp_args)}"
         )
@@ -253,7 +253,7 @@ async def submit_email(message_id: str) -> None:
         ]
     )
     _raise_on_jmap_error(result, "c1")
-    not_created: dict = result["methodResponses"][0][1].get("notCreated", {})
+    not_created: dict = result["methodResponses"][0][1].get("notCreated") or {}
     if "sub1" in not_created:
         raise RuntimeError(f"Email submission failed: {not_created['sub1']}")
 

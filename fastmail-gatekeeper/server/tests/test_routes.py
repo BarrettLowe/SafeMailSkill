@@ -69,6 +69,19 @@ def test_trash_email_propagates_502_on_jmap_error(client):
     assert resp.status_code == 502
 
 
+def test_trash_email_succeeds_when_jmap_returns_null_not_updated(client):
+    """Regression: JMAP response with notUpdated=null must not raise TypeError."""
+    with patch("app.main.move_to_folder", new_callable=AsyncMock) as mock_move:
+        mock_move.return_value = None
+        resp = client.post(
+            "/v1/delete",
+            json={"message_id": "msg-null"},
+            headers=AUTH,
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "success"
+
+
 # ── /v1/send ──────────────────────────────────────────────────────────────────
 
 
