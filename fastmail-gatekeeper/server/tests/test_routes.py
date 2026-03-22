@@ -263,31 +263,31 @@ def test_jmap_filters_blocked_mailboxes_from_mailbox_get(client):
         )
     assert resp.status_code == 200
     mb_list = resp.json()["methodResponses"][0][1]["list"]
-    ids = [m["id"] for m in mb_list]
-    assert "trash-real-id" not in ids
-    assert "inbox-id" in ids
+    names = [m["name"] for m in mb_list]
+    assert "Trash" not in names
+    assert "Inbox" in names
+    for m in mb_list:
+        assert "id" not in m
 
 
-def test_jmap_blocks_email_set_move_to_blocked_mailbox(client):
-    """Email/set targeting a blocked mailbox ID must return 403."""
+def test_jmap_email_set_unknown_mailbox_name_returns_400(client):
+    """Email/set with a mailbox name not in the cache must return 400."""
     mock_session = {"api_url": "https://api.example.com/jmap", "account_id": "acct-1", "ready": True}
     with (
         patch("app.main.get_session", new_callable=AsyncMock, return_value=mock_session),
-        patch.object(type(settings), "blocked_mailbox_id_set", return_value=frozenset(["blocked-mb"])),
+        patch.dict("app.main._mailbox_name_to_id", {}, clear=True),
     ):
         resp = client.post(
             "/v1/jmap",
             json={"methodCalls": [[
                 "Email/set",
-                {"update": {"msg-1": {"mailboxIds": {"blocked-mb": True}}}},
+                {"update": {"msg-1": {"mailboxIds": {"Trash": True}}}},
                 "c1",
             ]]},
             headers=AUTH,
         )
-    assert resp.status_code == 403
-    body = resp.json()
-    assert body["status"] == "blocked"
-    assert any(c["method"] == "Email/set" for c in body["blockedCalls"])
+    assert resp.status_code == 400
+    assert resp.json()["status"] == "error"
 
 
 def test_jmap_always_hides_trash_role_from_mailbox_get(client):
@@ -314,9 +314,11 @@ def test_jmap_always_hides_trash_role_from_mailbox_get(client):
             headers=AUTH,
         )
     assert resp.status_code == 200
-    ids = [m["id"] for m in resp.json()["methodResponses"][0][1]["list"]]
-    assert "trash-id" not in ids
-    assert "inbox-id" in ids
+    names = [m["name"] for m in resp.json()["methodResponses"][0][1]["list"]]
+    assert "trash-id" not in names
+    assert "Inbox" in names
+    for m in resp.json()["methodResponses"][0][1]["list"]:
+        assert "id" not in m
 
 
 def test_jmap_always_hides_snoozed_name_from_mailbox_get(client):
@@ -343,6 +345,79 @@ def test_jmap_always_hides_snoozed_name_from_mailbox_get(client):
             headers=AUTH,
         )
     assert resp.status_code == 200
-    ids = [m["id"] for m in resp.json()["methodResponses"][0][1]["list"]]
-    assert "snoozed-id" not in ids
-    assert "inbox-id" in ids
+    names = [m["name"] for m in resp.json()["methodResponses"][0][1]["list"]]
+    assert "Snoozed" not in names
+    assert "Inbox" in names
+    for m in resp.json()["methodResponses"][0][1]["list"]:
+        assert "id" not in m
+
+
+# ── /v1/mailboxes ───────────────────────────────────────────────────────────────────
+
+
+def test_v1_mailboxes_returns_names_without_ids(client):
+    """GET /v1/mailboxes must return name/role/counts with no raw IDs."""
+    mock_session = {"api_url": "https://api.example.com/jmap", "account_id": "acct-1", "ready": True}
+    mock_response = {
+        "methodResponses": [[
+            "Mailbox/get",
+            {"list": [
+                {"id": "inbox-id", "name": "Inbox", "role": "inbox", "totalEmails": 5, "unreadEmails": 2},
+                {"id": "trash-id", "name": "Trash", "role": "trash", "totalEmails": 10, "unreadEmails": 0},
+            ]},
+            "c1",
+        ]]
+    }
+    with (
+        patch("app.main.get_session", new_callable=AsyncMock, return_value=mock_session),
+        patch("app.main.jmap_call", new_callable=AsyncMock, return_value=mock_response),
+        patch.object(type(settings), "blocked_mailbox_id_set", return_value=frozenset()),
+    ):
+        resp = client.get("/v1/mailboxes", headers=AUTH)
+    assert resp.status_code == 200
+    data = resp.json()
+    names = [m["name"] for m in data]
+    assert "Inbox" in names
+    assert "Trash" not in names
+    for m in data:
+        assert "id" not in m
+
+
+def test_jmap_email_query_resolves_mailbox_name(client):
+    """Email/query inMailbox name must be resolved to a real ID before forwarding."""
+    mock_session = {"api_url": "https://api.example.com/jmap", "account_id": "acct-1", "ready": True}
+    captured = {}
+
+    async def capture(calls):
+        captured["calls"] = calls
+        return {"methodResponses": [["Email/query", {"ids": []}, "c1"]]}
+
+    with (
+        patch("app.main.get_session", new_callable=AsyncMock, return_value=mock_session),
+        patch("app.main.jmap_call", side_effect=capture),
+        patch.dict("app.main._mailbox_name_to_id", {"Inbox": "real-inbox-id"}, clear=True),
+    ):
+        resp = client.post(
+            "/v1/jmap",
+            json={"methodCalls": [["Email/query", {"filter": {"inMailbox": "Inbox"}}, "c1"]]},
+            headers=AUTH,
+        )
+    assert resp.status_code == 200
+    forwarded_filter = captured["calls"][0][1]["filter"]
+    assert forwarded_filter["inMailbox"] == "real-inbox-id"
+
+
+def test_jmap_email_query_unknown_mailbox_name_returns_400(client):
+    """Email/query with an unrecognised inMailbox name must return 400."""
+    mock_session = {"api_url": "https://api.example.com/jmap", "account_id": "acct-1", "ready": True}
+    with (
+        patch("app.main.get_session", new_callable=AsyncMock, return_value=mock_session),
+        patch.dict("app.main._mailbox_name_to_id", {}, clear=True),
+    ):
+        resp = client.post(
+            "/v1/jmap",
+            json={"methodCalls": [["Email/query", {"filter": {"inMailbox": "Trash"}}, "c1"]]},
+            headers=AUTH,
+        )
+    assert resp.status_code == 400
+    assert resp.json()["status"] == "error"

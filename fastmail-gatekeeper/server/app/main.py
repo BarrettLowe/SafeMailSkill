@@ -32,6 +32,10 @@ _ALWAYS_HIDDEN_ROLES: frozenset[str] = frozenset({"trash"})
 _ALWAYS_HIDDEN_NAMES: frozenset[str] = frozenset({"Snoozed"})
 # Populated at startup with the resolved IDs of always-hidden mailboxes.
 _always_blocked_ids: set[str] = set()
+# Populated at startup: maps agent-visible mailbox name → real Fastmail ID.
+# Hidden/blocked mailboxes are intentionally absent so name resolution cannot
+# resolve to a forbidden target.
+_mailbox_name_to_id: dict[str, str] = {}
 
 
 async def _print_mailbox_setup_help() -> None:
@@ -106,6 +110,15 @@ async def _print_mailboxes_startup() -> None:
         mb["id"] for mb in mailboxes
         if mb.get("role") in _ALWAYS_HIDDEN_ROLES or mb.get("name") in _ALWAYS_HIDDEN_NAMES
     )
+
+    # Populate name→ID cache (agent-visible mailboxes only).
+    _mailbox_name_to_id.clear()
+    _mailbox_name_to_id.update({
+        mb["name"]: mb["id"]
+        for mb in mailboxes
+        if mb["id"] not in _always_blocked_ids
+        and mb["id"] not in blocked_ids
+    })
 
     print(f"\n{_SEP}")
     print(" Fastmail mailboxes")
@@ -187,6 +200,37 @@ app = FastAPI(
 async def health() -> dict:
     return {"status": "ok"}
 
+@app.get("/v1/mailboxes", dependencies=[Depends(require_api_key)])
+async def list_mailboxes_for_agent():
+    """
+    Return the agent-visible mailbox list by name.
+    No raw Fastmail IDs are exposed — use mailbox names for all other calls.
+    """
+    try:
+        session = await get_session()
+        result = await jmap_call([
+            ["Mailbox/get", {"accountId": session["account_id"], "ids": None}, "c1"]
+        ])
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Fastmail API error (HTTP {exc.response.status_code})",
+        )
+    blocked_ids = settings.blocked_mailbox_id_set() | _always_blocked_ids
+    mailboxes = [
+        {
+            "name": m["name"],
+            "role": m.get("role"),
+            "totalEmails": m.get("totalEmails"),
+            "unreadEmails": m.get("unreadEmails"),
+        }
+        for m in result["methodResponses"][0][1].get("list", [])
+        if m.get("id") not in blocked_ids
+        and m.get("role") not in _ALWAYS_HIDDEN_ROLES
+        and m.get("name") not in _ALWAYS_HIDDEN_NAMES
+    ]
+    mailboxes.sort(key=lambda m: (m.get("role") or "z", m["name"].lower()))
+    return mailboxes
 
 # ── Side-effect endpoints (explicit safe actions) ─────────────────────────────
 
@@ -249,10 +293,9 @@ async def approve_email(req: ApproveRequest):
 
 
 def _redact_blocked_mailboxes(response: dict, blocked_ids: frozenset) -> dict:
-    """Strip blocked mailbox IDs from any Mailbox/get entries in a JMAP response.
-
-    Always hides mailboxes matching _ALWAYS_HIDDEN_ROLES / _ALWAYS_HIDDEN_NAMES
-    regardless of the operator-configured blocked_ids set.
+    """Sanitise Mailbox/get entries in a JMAP response:
+    - Strip hidden mailboxes entirely (always-hidden roles/names + operator-blocked IDs).
+    - Strip the 'id' field from remaining entries so the agent only ever sees names.
     """
     filtered = []
     for entry in response.get("methodResponses", []):
@@ -260,7 +303,8 @@ def _redact_blocked_mailboxes(response: dict, blocked_ids: frozenset) -> dict:
             args = {
                 **entry[1],
                 "list": [
-                    m for m in entry[1].get("list", [])
+                    {k: v for k, v in m.items() if k != "id"}
+                    for m in entry[1].get("list", [])
                     if m.get("id") not in blocked_ids
                     and m.get("role") not in _ALWAYS_HIDDEN_ROLES
                     and m.get("name") not in _ALWAYS_HIDDEN_NAMES
@@ -310,7 +354,49 @@ async def jmap_proxy(req: JMAPProxyRequest):
             args["accountId"] = account_id
         enriched.append([method, args, call_id])
 
-    # Block Email/set moves that target a hidden mailbox (operator-configured + always-hidden).
+    # Resolve mailbox names → real IDs (agents always pass names, never raw IDs).
+    # _mailbox_name_to_id only contains visible, non-blocked mailboxes, so any
+    # lookup miss means the name is either unknown or intentionally hidden.
+    resolved: list = []
+    for method, args, call_id in enriched:
+        if method == "Email/query" and isinstance(args.get("filter"), dict):
+            filt = dict(args["filter"])
+            if "inMailbox" in filt:
+                name = filt["inMailbox"]
+                real_id = _mailbox_name_to_id.get(name)
+                if real_id is None:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "status": "error",
+                            "reason": f"Unknown mailbox '{name}'. Use GET /v1/mailboxes for available mailboxes.",
+                        },
+                    )
+                args = {**args, "filter": {**filt, "inMailbox": real_id}}
+            # No inMailbox key — searching across all mailboxes is allowed.
+        elif method == "Email/set" and isinstance(args.get("update"), dict):
+            new_update = {}
+            for msg_id, patch in args["update"].items():
+                if isinstance(patch, dict) and "mailboxIds" in patch:
+                    new_ids = {}
+                    for key, val in patch["mailboxIds"].items():
+                        real_id = _mailbox_name_to_id.get(key)
+                        if real_id is None:
+                            return JSONResponse(
+                                status_code=400,
+                                content={
+                                    "status": "error",
+                                    "reason": f"Unknown mailbox '{key}'. Use GET /v1/mailboxes for available mailboxes.",
+                                },
+                            )
+                        new_ids[real_id] = val
+                    patch = {**patch, "mailboxIds": new_ids}
+                new_update[msg_id] = patch
+            args = {**args, "update": new_update}
+        resolved.append([method, args, call_id])
+    enriched = resolved
+
+    # Block Email/set moves that target a hidden mailbox (safety net after name resolution).
     blocked_ids = settings.blocked_mailbox_id_set() | _always_blocked_ids
     if blocked_ids:
         for method, args, call_id in enriched:

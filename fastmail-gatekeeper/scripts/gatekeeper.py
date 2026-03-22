@@ -9,12 +9,12 @@ Usage:
 
 Commands:
     list-mailboxes
-    list-emails     <mailbox_id> [--limit N] [--search TEXT] [--from ADDR]
+    list-emails     [<mailbox_name>] [--limit N] [--search TEXT] [--from ADDR]
                                  [--subject TEXT] [--unread] [--after ISO] [--before ISO]
     get-email       <message_id>
     get-thread      <thread_id>
     trash           <message_id>
-    move            <message_id> <mailbox_id>
+    move            <message_id> <mailbox_name>
     mark-read       <message_id>
     mark-unread     <message_id>
     flag            <message_id>
@@ -79,24 +79,14 @@ def _die_json(code: int, payload: dict):
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 def cmd_list_mailboxes(_args):
-    result = _jmap([["Mailbox/get", {"ids": None}, "c1"]])
-    mailboxes = result["methodResponses"][0][1].get("list", [])
-    mailboxes.sort(key=lambda m: (m.get("role") or "z", m["name"].lower()))
-    print(json.dumps([
-        {
-            "id":           m["id"],
-            "name":         m["name"],
-            "role":         m.get("role"),
-            "totalEmails":  m.get("totalEmails"),
-            "unreadEmails": m.get("unreadEmails"),
-        }
-        for m in mailboxes
-    ], indent=2))
+    result = _request("GET", "/v1/mailboxes")
+    print(json.dumps(result, indent=2))
 
 
 def cmd_list_emails(args):
-    filt: dict = {"inMailbox": args.mailbox_id}
-    if args.search:   filt["text"]       = args.search
+    filt: dict = {}
+    if args.mailbox_name: filt["inMailbox"] = args.mailbox_name
+    if args.search:       filt["text"]      = args.search
     if args.from_:    filt["from"]        = args.from_
     if args.subject:  filt["subject"]     = args.subject
     if args.unread:   filt["notKeyword"]  = "$seen"
@@ -162,7 +152,7 @@ def cmd_move(args):
         ["Email/set", {
             "update": {
                 args.message_id: {
-                    "mailboxIds": {args.mailbox_id: True}
+                    "mailboxIds": {args.mailbox_name: True}
                 }
             }
         }, "c1"],
@@ -211,7 +201,7 @@ def main():
     sub.add_parser("list-mailboxes")
 
     le = sub.add_parser("list-emails")
-    le.add_argument("mailbox_id")
+    le.add_argument("mailbox_name", nargs="?", default=None)
     le.add_argument("--limit",   type=int, default=20)
     le.add_argument("--search",  dest="search")
     le.add_argument("--from",    dest="from_")
@@ -231,7 +221,7 @@ def main():
 
     mv = sub.add_parser("move")
     mv.add_argument("message_id")
-    mv.add_argument("mailbox_id")
+    mv.add_argument("mailbox_name")
 
     for name in ("mark-read", "mark-unread", "flag", "unflag"):
         sp = sub.add_parser(name)
