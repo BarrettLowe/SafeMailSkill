@@ -1,6 +1,6 @@
 ---
 name: fastmail-gatekeeper
-description: Read, search, triage, and safely manage Fastmail email via JMAP. Use when working with email: reading the inbox, searching messages, fetching thread context, safely trashing email (never permanent delete), or drafting and sending email requiring human PIN approval.
+description: Read, search, triage, and safely manage Fastmail email via JMAP. Use when working with email to read the inbox, search messages, fetch thread context, safely trash email (never permanent delete), or draft and send email requiring human PIN approval.
 compatibility: Requires the gatekeeper server to be running and reachable. See references/SETUP.md for operator setup instructions.
 metadata: {"openclaw": {"requires": {"env": ["GATEKEEPER_API_KEY"], "bins": ["python3"]}}}
 ---
