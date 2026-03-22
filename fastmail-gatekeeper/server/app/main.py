@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 
 _SEP = "=" * 70
 
+# Mailboxes permanently hidden from the agent — cannot be overridden by env config.
+_ALWAYS_HIDDEN_ROLES: frozenset[str] = frozenset({"trash"})
+_ALWAYS_HIDDEN_NAMES: frozenset[str] = frozenset({"Snoozed"})
+# Populated at startup with the resolved IDs of always-hidden mailboxes.
+_always_blocked_ids: set[str] = set()
+
 
 async def _print_mailbox_setup_help() -> None:
     """Fetch the user's Fastmail mailbox list and print setup instructions."""
@@ -94,6 +100,13 @@ async def _print_mailboxes_startup() -> None:
 
     blocked_ids = settings.blocked_mailbox_id_set()
 
+    # Resolve and cache IDs of always-hidden mailboxes for move-blocking.
+    _always_blocked_ids.clear()
+    _always_blocked_ids.update(
+        mb["id"] for mb in mailboxes
+        if mb.get("role") in _ALWAYS_HIDDEN_ROLES or mb.get("name") in _ALWAYS_HIDDEN_NAMES
+    )
+
     print(f"\n{_SEP}")
     print(" Fastmail mailboxes")
     print(f"{_SEP}\n")
@@ -102,11 +115,17 @@ async def _print_mailboxes_startup() -> None:
     print(f"  {'-'*95}")
     for mb in mailboxes:
         role = mb.get("role") or ""
-        agent_col = "blocked" if mb["id"] in blocked_ids else "visible"
+        if mb["id"] in _always_blocked_ids:
+            agent_col = "blocked*"
+        elif mb["id"] in blocked_ids:
+            agent_col = "blocked"
+        else:
+            agent_col = "visible"
         print(f"  {mb['name']:<35} {role:<15} {agent_col:<9} {mb['id']}")
     print()
+    print("  * always blocked (Trash, Snoozed) — cannot be changed via env config")
     if not blocked_ids:
-        print("  Tip: set AGENT_BLOCKED_MAILBOX_IDS=<id1>,<id2> to hide mailboxes from the agent.")
+        print("  Tip: set AGENT_BLOCKED_MAILBOX_IDS=<id1>,<id2> to hide additional mailboxes from the agent.")
     print(f"{_SEP}\n", flush=True)
 
 
@@ -230,9 +249,11 @@ async def approve_email(req: ApproveRequest):
 
 
 def _redact_blocked_mailboxes(response: dict, blocked_ids: frozenset) -> dict:
-    """Strip blocked mailbox IDs from any Mailbox/get entries in a JMAP response."""
-    if not blocked_ids:
-        return response
+    """Strip blocked mailbox IDs from any Mailbox/get entries in a JMAP response.
+
+    Always hides mailboxes matching _ALWAYS_HIDDEN_ROLES / _ALWAYS_HIDDEN_NAMES
+    regardless of the operator-configured blocked_ids set.
+    """
     filtered = []
     for entry in response.get("methodResponses", []):
         if len(entry) == 3 and entry[0] == "Mailbox/get" and isinstance(entry[1], dict):
@@ -241,6 +262,8 @@ def _redact_blocked_mailboxes(response: dict, blocked_ids: frozenset) -> dict:
                 "list": [
                     m for m in entry[1].get("list", [])
                     if m.get("id") not in blocked_ids
+                    and m.get("role") not in _ALWAYS_HIDDEN_ROLES
+                    and m.get("name") not in _ALWAYS_HIDDEN_NAMES
                 ],
             }
             filtered.append([entry[0], args, entry[2]])
@@ -287,8 +310,8 @@ async def jmap_proxy(req: JMAPProxyRequest):
             args["accountId"] = account_id
         enriched.append([method, args, call_id])
 
-    # Block Email/set moves that target a hidden mailbox.
-    blocked_ids = settings.blocked_mailbox_id_set()
+    # Block Email/set moves that target a hidden mailbox (operator-configured + always-hidden).
+    blocked_ids = settings.blocked_mailbox_id_set() | _always_blocked_ids
     if blocked_ids:
         for method, args, call_id in enriched:
             if method == "Email/set" and isinstance(args.get("update"), dict):
