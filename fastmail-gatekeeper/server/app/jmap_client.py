@@ -122,7 +122,10 @@ async def move_to_folder(message_id: str, folder_id: str) -> None:
         ]
     )
     _raise_on_jmap_error(result, "c1")
-    not_updated: dict = result["methodResponses"][0][1].get("notUpdated", {})
+    responses = result.get("methodResponses", [])
+    if not responses or len(responses[0]) < 2 or not isinstance(responses[0][1], dict):
+        raise RuntimeError("Unexpected JMAP response structure from Email/set")
+    not_updated: dict = responses[0][1].get("notUpdated", {})
     if message_id in not_updated:
         raise RuntimeError(f"JMAP notUpdated: {not_updated[message_id]}")
 

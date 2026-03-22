@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from app.config import settings
 from app.main import app
 
 AUTH = {"Authorization": "Bearer test-api-key-abc123xxx"}
@@ -215,3 +216,62 @@ def test_jmap_injects_account_id(client):
 
     injected_args = captured["calls"][0][1]
     assert injected_args["accountId"] == "injected-account"
+
+
+# ── /v1/jmap — blocked mailbox redaction ─────────────────────────────────────────
+
+
+def test_jmap_filters_blocked_mailboxes_from_mailbox_get(client):
+    """Mailboxes in AGENT_BLOCKED_MAILBOX_IDS must be stripped from Mailbox/get responses."""
+    mock_session = {
+        "api_url": "https://api.example.com/jmap",
+        "account_id": "acct-1",
+        "ready": True,
+    }
+    mock_response = {
+        "methodResponses": [[
+            "Mailbox/get",
+            {"list": [
+                {"id": "inbox-id", "name": "Inbox", "role": "inbox"},
+                {"id": "trash-real-id", "name": "Trash", "role": "trash"},
+            ]},
+            "c1",
+        ]]
+    }
+    with (
+        patch("app.main.get_session", new_callable=AsyncMock, return_value=mock_session),
+        patch("app.main.jmap_call", new_callable=AsyncMock, return_value=mock_response),
+        patch.object(type(settings), "blocked_mailbox_id_set", return_value=frozenset(["trash-real-id"])),
+    ):
+        resp = client.post(
+            "/v1/jmap",
+            json={"methodCalls": [["Mailbox/get", {}, "c1"]]},
+            headers=AUTH,
+        )
+    assert resp.status_code == 200
+    mb_list = resp.json()["methodResponses"][0][1]["list"]
+    ids = [m["id"] for m in mb_list]
+    assert "trash-real-id" not in ids
+    assert "inbox-id" in ids
+
+
+def test_jmap_blocks_email_set_move_to_blocked_mailbox(client):
+    """Email/set targeting a blocked mailbox ID must return 403."""
+    mock_session = {"api_url": "https://api.example.com/jmap", "account_id": "acct-1", "ready": True}
+    with (
+        patch("app.main.get_session", new_callable=AsyncMock, return_value=mock_session),
+        patch.object(type(settings), "blocked_mailbox_id_set", return_value=frozenset(["blocked-mb"])),
+    ):
+        resp = client.post(
+            "/v1/jmap",
+            json={"methodCalls": [[
+                "Email/set",
+                {"update": {"msg-1": {"mailboxIds": {"blocked-mb": True}}}},
+                "c1",
+            ]]},
+            headers=AUTH,
+        )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["status"] == "blocked"
+    assert any(c["method"] == "Email/set" for c in body["blockedCalls"])

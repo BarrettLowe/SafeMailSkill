@@ -14,11 +14,23 @@ class Settings(BaseSettings):
     ai_trash_id: Optional[str] = None
     ai_outgoing_id: Optional[str] = None
 
+    # Comma-separated mailbox IDs the agent must not see or target via /v1/jmap
+    agent_blocked_mailbox_ids: Optional[str] = None
+
     # ntfy.sh
     ntfy_topic: Optional[str] = None
 
     # Gatekeeper auth
     gatekeeper_api_key: Optional[str] = None
+
+
+    def blocked_mailbox_id_set(self) -> frozenset:
+        """Return the set of mailbox IDs that must not be visible to or targeted by the agent."""
+        if not self.agent_blocked_mailbox_ids:
+            return frozenset()
+        return frozenset(
+            x.strip() for x in self.agent_blocked_mailbox_ids.split(",") if x.strip()
+        )
 
 
 settings = Settings()

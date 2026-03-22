@@ -65,6 +65,9 @@ async def _print_mailbox_setup_help() -> None:
         print("  don't exist, then set these in your .env file (or -e flags):\n")
         print("    AI_TRASH_ID=<id of your ai_trash mailbox>")
         print("    AI_OUTGOING_ID=<id of your ai_outgoing mailbox>")
+        print()
+        print("  Optionally, hide mailboxes from the agent:")
+        print("    AGENT_BLOCKED_MAILBOX_IDS=<id1>,<id2>,...")
         print(f"\n{_SEP}\n", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"\n{_SEP}")
@@ -74,6 +77,37 @@ async def _print_mailbox_setup_help() -> None:
         print("  Run:  FASTMAIL_TOKEN=<token> python scripts/list_mailboxes.py")
         print("  Then set AI_TRASH_ID and AI_OUTGOING_ID in your .env file.")
         print(f"\n{_SEP}\n", flush=True)
+
+
+async def _print_mailboxes_startup() -> None:
+    """Print all Fastmail mailboxes to stdout at startup, showing agent visibility per row."""
+    try:
+        session = await get_session()
+        result = await jmap_call([
+            ["Mailbox/get", {"accountId": session["account_id"], "ids": None}, "c1"]
+        ])
+        mailboxes: list = result["methodResponses"][0][1].get("list", [])
+        mailboxes.sort(key=lambda m: (m.get("role") or "z", m["name"].lower()))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not fetch mailbox list for startup output: %s", exc)
+        return
+
+    blocked_ids = settings.blocked_mailbox_id_set()
+
+    print(f"\n{_SEP}")
+    print(" Fastmail mailboxes")
+    print(f"{_SEP}\n")
+    print(f"  Account ID : {session['account_id']}\n")
+    print(f"  {'NAME':<35} {'ROLE':<15} {'AGENT':<9} ID")
+    print(f"  {'-'*95}")
+    for mb in mailboxes:
+        role = mb.get("role") or ""
+        agent_col = "blocked" if mb["id"] in blocked_ids else "visible"
+        print(f"  {mb['name']:<35} {role:<15} {agent_col:<9} {mb['id']}")
+    print()
+    if not blocked_ids:
+        print("  Tip: set AGENT_BLOCKED_MAILBOX_IDS=<id1>,<id2> to hide mailboxes from the agent.")
+    print(f"{_SEP}\n", flush=True)
 
 
 @asynccontextmanager
@@ -112,6 +146,7 @@ async def lifespan(app: FastAPI):
             "No Fastmail sending identity found — /v1/send and /v1/approve will fail."
         )
 
+    await _print_mailboxes_startup()
     yield
 
 
@@ -194,6 +229,26 @@ async def approve_email(req: ApproveRequest):
 # ── Generic JMAP proxy ────────────────────────────────────────────────────────
 
 
+def _redact_blocked_mailboxes(response: dict, blocked_ids: frozenset) -> dict:
+    """Strip blocked mailbox IDs from any Mailbox/get entries in a JMAP response."""
+    if not blocked_ids:
+        return response
+    filtered = []
+    for entry in response.get("methodResponses", []):
+        if len(entry) == 3 and entry[0] == "Mailbox/get" and isinstance(entry[1], dict):
+            args = {
+                **entry[1],
+                "list": [
+                    m for m in entry[1].get("list", [])
+                    if m.get("id") not in blocked_ids
+                ],
+            }
+            filtered.append([entry[0], args, entry[2]])
+        else:
+            filtered.append(entry)
+    return {**response, "methodResponses": filtered}
+
+
 @app.post("/v1/jmap", dependencies=[Depends(require_api_key)])
 async def jmap_proxy(req: JMAPProxyRequest):
     """
@@ -205,7 +260,7 @@ async def jmap_proxy(req: JMAPProxyRequest):
     - Identity/set, VacationResponse/set, SieveScript/set
 
     **Also blocked**: Email/set updates that set mailboxIds to {} or null
-    (equivalent to deletion).
+    (equivalent to deletion), or that target a mailbox in AGENT_BLOCKED_MAILBOX_IDS.
 
     The server automatically injects the correct accountId — callers do not
     need to know or supply it.
@@ -232,10 +287,34 @@ async def jmap_proxy(req: JMAPProxyRequest):
             args["accountId"] = account_id
         enriched.append([method, args, call_id])
 
+    # Block Email/set moves that target a hidden mailbox.
+    blocked_ids = settings.blocked_mailbox_id_set()
+    if blocked_ids:
+        for method, args, call_id in enriched:
+            if method == "Email/set" and isinstance(args.get("update"), dict):
+                for patch in args["update"].values():
+                    if isinstance(patch, dict):
+                        for mbx_id in patch.get("mailboxIds", {}):
+                            if mbx_id in blocked_ids:
+                                return JSONResponse(
+                                    status_code=403,
+                                    content={
+                                        "status": "blocked",
+                                        "reason": "One or more method calls are not permitted by gatekeeper policy",
+                                        "blockedCalls": [{
+                                            "method": method,
+                                            "callId": call_id,
+                                            "reason": "Email/set targets a mailbox that is not accessible to the agent",
+                                        }],
+                                    },
+                                )
+
     try:
-        return await jmap_call(enriched)
+        response = await jmap_call(enriched)
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
             status_code=502,
             detail=f"Fastmail API error (HTTP {exc.response.status_code})",
         )
+
+    return _redact_blocked_mailboxes(response, blocked_ids)
