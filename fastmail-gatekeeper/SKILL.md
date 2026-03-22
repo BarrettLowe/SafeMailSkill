@@ -1,295 +1,79 @@
 ---
 name: fastmail-gatekeeper
-description: Read, search, triage, and safely manage Fastmail email via JMAP. Use when working with email: reading the inbox, searching messages, fetching thread context, safely trashing email (never permanent delete), or drafting and sending email requiring human PIN approval. Handles trash_email, send_email, approve_email, and all general read operations.
+description: Read, search, triage, and safely manage Fastmail email via JMAP. Use when working with email: reading the inbox, searching messages, fetching thread context, safely trashing email (never permanent delete), or drafting and sending email requiring human PIN approval.
 compatibility: Requires the gatekeeper server to be running and reachable. See references/SETUP.md for operator setup instructions.
-metadata: {"openclaw": {"requires": {"env": ["GATEKEEPER_API_KEY"], "bins": ["curl"]}}}
+metadata: {"openclaw": {"requires": {"env": ["GATEKEEPER_API_KEY"], "bins": ["python3"]}}}
 ---
 
 # Fastmail Gatekeeper
 
-A secure mail API that gives the agent safe, auditable access to email.
-All requests require authentication and all permanent deletion is blocked
-at the server level.
+Use `scripts/gatekeeper.py` for all operations. It reads `GATEKEEPER_API_KEY` from
+the environment and always prints JSON to stdout. Errors go to stderr with an
+`"error"` key (or `"http_status"` for HTTP errors).
 
-**Base URL:** `http://127.0.0.1:8080`
+---
 
-Every `/v1/*` request requires:
+## Safety rules
+
+- Never use `Email/destroy` or `EmailSubmission/set` — both are blocked (403).
+- To discard email use `trash` — it moves the message to `ai_trash`, not permanent.
+- Sending always requires human approval: call `send`, then wait for the user to
+  call `approve` with the PIN shown on their device.
+
+---
+
+## Commands
+
 ```
-Authorization: Bearer $GATEKEEPER_API_KEY
+python scripts/gatekeeper.py list-mailboxes
+```
+Returns `[{id, name, role, totalEmails, unreadEmails}]` sorted by role then name.
+
+```
+python scripts/gatekeeper.py list-emails <mailbox_id> [options]
+  --limit N        default 20
+  --search TEXT    full-text across all fields
+  --from ADDR      sender partial match
+  --subject TEXT   subject partial match
+  --unread         only unseen messages
+  --after  ISO     e.g. 2026-01-01T00:00:00Z
+  --before ISO
+```
+
+```
+python scripts/gatekeeper.py get-email  <message_id>
+python scripts/gatekeeper.py get-thread <thread_id>
+```
+`get-email` returns the full message including `textBody`/`bodyValues`.
+The plain-text body is at `bodyValues[textBody[0].partId].value`.
+
+```
+python scripts/gatekeeper.py trash   <message_id>     # moves to ai_trash
+python scripts/gatekeeper.py move    <message_id> <mailbox_id>
+python scripts/gatekeeper.py mark-read   <message_id>
+python scripts/gatekeeper.py mark-unread <message_id>
+python scripts/gatekeeper.py flag        <message_id>
+python scripts/gatekeeper.py unflag      <message_id>
+```
+
+```
+python scripts/gatekeeper.py send    <to> <subject> <body>
+# → {"status": "pending", "message": "Approval required. Check your mobile device."}
+
+python scripts/gatekeeper.py approve <pin>
+# → {"status": "sent"}  or  {"status": "error", "message": "Invalid PIN"}
 ```
 
 ---
 
-## Safety Rules — read before acting
+## HTTP error codes (returned in JSON via stderr)
 
-- **Never use `Email/destroy`.** It is blocked by the server and will return 403.
-- **Never call `EmailSubmission/set` via `/v1/jmap`.** It is blocked.
-- **Always use `trash_email` (`POST /v1/delete`) to discard email.** This moves the message to `ai_trash`; it is not permanent and can be recovered.
-- **Email sending always requires human approval.** Use `/v1/send` (creates draft + sends PIN) then wait for the user to call `/v1/approve` with the PIN.
-
----
-
-## trash_email — safe "delete"
-
-Moves a message to `ai_trash`. **Not permanent. Always prefer this over any other deletion method.**
-
-```bash
-curl -s -X POST http://127.0.0.1:8080/v1/delete \
-  -H "Authorization: Bearer $GATEKEEPER_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"message_id": "<EMAIL_ID>"}'
-```
-
-**Success:**
-```json
-{"status": "success", "message": "Email moved to ai_trash"}
-```
-
----
-
-## send_email — draft + approval flow
-
-Creates a draft in `ai_outgoing` and sends a PIN push notification via ntfy. The email is **not sent** until `approve_email` is called.
-
-```bash
-curl -s -X POST http://127.0.0.1:8080/v1/send \
-  -H "Authorization: Bearer $GATEKEEPER_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "to": "recipient@example.com",
-    "subject": "Subject here",
-    "body": "Plain text body."
-  }'
-```
-
-**Response (pending — not yet sent):**
-```json
-{"status": "pending", "message": "Approval required. Check your mobile device."}
-```
-
----
-
-## approve_email — confirm and send
-
-After the user receives the PIN on their device, submit the queued draft:
-
-```bash
-curl -s -X POST http://127.0.0.1:8080/v1/approve \
-  -H "Authorization: Bearer $GATEKEEPER_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"pin": "1234"}'
-```
-
-**Responses:**
-```json
-{"status": "sent"}
-```
-```json
-{"status": "error", "message": "Invalid PIN"}
-```
-
----
-
-## Reading mail via the JMAP proxy
-
-For all read/search/label/move operations use `POST /v1/jmap`.
-
-You do not need to supply `accountId` — the server injects it automatically.
-Just provide the `methodCalls` array.
-
-Request shape:
-```json
-{
-  "methodCalls": [
-    ["MethodName", { ...args... }, "callId"],
-    ...
-  ]
-}
-```
-
-Response shape (passed through from Fastmail):
-```json
-{
-  "methodResponses": [
-    ["MethodName", { ...result... }, "callId"],
-    ...
-  ],
-  "sessionState": "..."
-}
-```
-
-### List mailboxes
-
-```bash
-curl -s -X POST http://127.0.0.1:8080/v1/jmap \
-  -H "Authorization: Bearer $GATEKEEPER_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "methodCalls": [
-      ["Mailbox/get", {"ids": null}, "c1"]
-    ]
-  }'
-```
-
-Each mailbox entry includes: `id`, `name`, `role`, `totalEmails`, `unreadEmails`, `parentId`.
-
-Common `role` values: `inbox`, `sent`, `drafts`, `trash`, `spam`, `archive`.
-
-### Search / list emails
-
-```bash
-curl -s -X POST http://127.0.0.1:8080/v1/jmap \
-  -H "Authorization: Bearer $GATEKEEPER_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "methodCalls": [
-      ["Email/query", {
-        "filter": {
-          "inMailbox": "<MAILBOX_ID>",
-          "text": "optional search term"
-        },
-        "sort": [{"property": "receivedAt", "isAscending": false}],
-        "limit": 20,
-        "position": 0
-      }, "c1"],
-      ["Email/get", {
-        "#ids": {"resultOf": "c1", "name": "Email/query", "path": "/ids"},
-        "properties": ["id", "threadId", "subject", "from", "to", "receivedAt", "preview", "keywords"]
-      }, "c2"]
-    ]
-  }'
-```
-
-**Supported `filter` fields:**
-
-| Field | Type | Description |
-|---|---|---|
-| `inMailbox` | string | Mailbox ID to restrict search |
-| `text` | string | Full-text search across all fields |
-| `from` | string | Sender address (partial match) |
-| `to` | string | Recipient address (partial match) |
-| `subject` | string | Subject line (partial match) |
-| `hasKeyword` | string | JMAP keyword e.g. `"$seen"`, `"$flagged"` |
-| `notKeyword` | string | Exclude messages with this keyword |
-| `after` | UTCDate | e.g. `"2026-01-01T00:00:00Z"` |
-| `before` | UTCDate | e.g. `"2026-03-01T00:00:00Z"` |
-| `minSize` / `maxSize` | int | Message size in bytes |
-
-### Fetch a full email with body
-
-```bash
-curl -s -X POST http://127.0.0.1:8080/v1/jmap \
-  -H "Authorization: Bearer $GATEKEEPER_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "methodCalls": [
-      ["Email/get", {
-        "ids": ["<MESSAGE_ID>"],
-        "properties": [
-          "id", "threadId", "subject", "from", "to", "cc", "replyTo",
-          "receivedAt", "keywords", "textBody", "bodyValues"
-        ],
-        "fetchTextBodyValues": true,
-        "maxBodyValueBytes": 32768
-      }, "c1"]
-    ]
-  }'
-```
-
-The plain-text body is in `bodyValues[<partId>].value`, where `<partId>` comes
-from `textBody[0].partId` in the response.
-
-### Fetch a thread
-
-First, get the `threadId` from an `Email/get` or `Email/query` result
-(add `"threadId"` to `properties`). Then:
-
-```bash
-curl -s -X POST http://127.0.0.1:8080/v1/jmap \
-  -H "Authorization: Bearer $GATEKEEPER_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "methodCalls": [
-      ["Thread/get", {
-        "ids": ["<THREAD_ID>"]
-      }, "c1"],
-      ["Email/get", {
-        "#ids": {
-          "resultOf": "c1",
-          "name": "Thread/get",
-          "path": "/list/*/emailIds"
-        },
-        "properties": ["id", "subject", "from", "receivedAt", "preview", "keywords"]
-      }, "c2"]
-    ]
-  }'
-```
-
-### Move email to a different mailbox
-
-```bash
-curl -s -X POST http://127.0.0.1:8080/v1/jmap \
-  -H "Authorization: Bearer $GATEKEEPER_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "methodCalls": [
-      ["Email/set", {
-        "update": {
-          "<MESSAGE_ID>": {
-            "mailboxIds": {"<DESTINATION_MAILBOX_ID>": true}
-          }
-        }
-      }, "c1"]
-    ]
-  }'
-```
-
-Note: setting `mailboxIds` to `{}` or `null` is blocked (equivalent to deletion).
-
-### Mark as read / flag
-
-```bash
-curl -s -X POST http://127.0.0.1:8080/v1/jmap \
-  -H "Authorization: Bearer $GATEKEEPER_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "methodCalls": [
-      ["Email/set", {
-        "update": {
-          "<MESSAGE_ID>": {
-            "keywords/$seen": true
-          }
-        }
-      }, "c1"]
-    ]
-  }'
-```
-
-Use `"keywords/$flagged": true` to star a message.
-Use `null` instead of `true` to remove a keyword.
-
----
-
-## Error Responses
-
-| HTTP | Meaning |
+| Code | Meaning |
 |------|---------|
-| 401 | Missing or invalid `Authorization: Bearer` header |
-| 403 | Blocked JMAP method — response body includes `blockedCalls` list |
-| 404 | PIN not found / message not found |
-| 422 | Validation error (bad email address, PIN not 4 digits, etc.) |
-| 502 | Server-side or upstream error — the request reached the server but could not be completed |
+| 401  | Missing or invalid API key |
+| 403  | Blocked JMAP method |
+| 404  | PIN or message not found |
+| 422  | Validation error |
+| 502  | Upstream error |
 
-**Blocked method response:**
-```json
-{
-  "status": "blocked",
-  "reason": "One or more method calls are not permitted by gatekeeper policy",
-  "blockedCalls": [
-    {"method": "Email/destroy", "callId": "c1", "reason": "Method not permitted by gatekeeper policy"}
-  ]
-}
-```
-
-
-See [references/JMAP_REFERENCE.md](references/JMAP_REFERENCE.md) for a fuller JMAP property and filter reference.
+See [references/JMAP_REFERENCE.md](references/JMAP_REFERENCE.md) for full JMAP property/filter reference.
