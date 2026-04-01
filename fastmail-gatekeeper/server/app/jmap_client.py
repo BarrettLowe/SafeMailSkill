@@ -6,6 +6,7 @@ cached for the lifetime of the process. Single-worker uvicorn makes this safe.
 """
 
 import logging
+import urllib.parse
 from typing import Any
 
 import httpx
@@ -41,6 +42,7 @@ async def get_session() -> dict[str, Any]:
         data = resp.json()
 
         api_url: str = data["apiUrl"]
+        download_url: str = data.get("downloadUrl", "")
         primary_accounts: dict = data.get("primaryAccounts", {})
         account_id: str = primary_accounts["urn:ietf:params:jmap:mail"]
         submit_account_id: str = primary_accounts.get(
@@ -77,6 +79,7 @@ async def get_session() -> dict[str, Any]:
     _session_cache.update(
         {
             "api_url": api_url,
+            "download_url": download_url,
             "account_id": account_id,
             "submit_account_id": submit_account_id,
             "from_email": primary["email"] if primary else None,
@@ -256,6 +259,75 @@ async def submit_email(message_id: str) -> None:
     not_created: dict = result["methodResponses"][0][1].get("notCreated") or {}
     if "sub1" in not_created:
         raise RuntimeError(f"Email submission failed: {not_created['sub1']}")
+
+
+async def get_email_attachments(message_id: str) -> list[dict]:
+    """
+    Return the attachment metadata list for a message.
+
+    Each entry contains at least: blobId, name, type, size.
+    Returns an empty list if the message has no attachments.
+    """
+    session = await get_session()
+    result = await jmap_call([
+        [
+            "Email/get",
+            {
+                "accountId": session["account_id"],
+                "ids": [message_id],
+                "properties": ["attachments"],
+            },
+            "c1",
+        ]
+    ])
+    _raise_on_jmap_error(result, "c1")
+    emails: list = result["methodResponses"][0][1].get("list", [])
+    if not emails:
+        return []
+    return emails[0].get("attachments") or []
+
+
+async def download_blob(blob_id: str, name: str, content_type: str) -> bytes:
+    """
+    Download a blob from Fastmail using the JMAP download URL template.
+
+    Returns the raw bytes of the blob.
+    Raises RuntimeError if the session does not expose a downloadUrl.
+    """
+    session = await get_session()
+    download_url_template: str = session.get("download_url", "")
+    if not download_url_template:
+        raise RuntimeError(
+            "Fastmail session does not provide a downloadUrl — "
+            "cannot download attachments"
+        )
+
+    url = (
+        download_url_template
+        .replace("{accountId}", urllib.parse.quote(session["account_id"], safe=""))
+        .replace("{blobId}", urllib.parse.quote(blob_id, safe=""))
+        .replace("{name}", urllib.parse.quote(name, safe=""))
+        .replace("{type}", urllib.parse.quote(content_type, safe=""))
+    )
+
+    # Guard against SSRF: verify the constructed URL shares the same scheme and
+    # host as the session-provided template (which itself comes from Fastmail's
+    # authenticated JMAP session endpoint).
+    parsed_template = urllib.parse.urlparse(download_url_template)
+    parsed_url = urllib.parse.urlparse(url)
+    if parsed_url.scheme != parsed_template.scheme or parsed_url.netloc != parsed_template.netloc:
+        raise RuntimeError(
+            "Constructed download URL does not match the session host — request refused"
+        )
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.get(
+            url,
+            headers={"Authorization": f"Bearer {settings.fastmail_token}"},
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+        return resp.content
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

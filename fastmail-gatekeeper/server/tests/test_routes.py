@@ -421,3 +421,157 @@ def test_jmap_email_query_unknown_mailbox_name_returns_400(client):
         )
     assert resp.status_code == 400
     assert resp.json()["status"] == "error"
+
+
+# ── /v1/download ──────────────────────────────────────────────────────────────
+
+
+def test_download_missing_auth_returns_401(client):
+    resp = client.post("/v1/download", json={"message_id": "msg1", "filename": "doc.docx"})
+    assert resp.status_code == 401
+
+
+def test_download_disallowed_extension_returns_400(client):
+    resp = client.post(
+        "/v1/download",
+        json={"message_id": "msg1", "filename": "malware.exe"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["status"] == "error"
+    assert ".exe" in body["message"]
+
+
+def test_download_no_extension_returns_400(client):
+    resp = client.post(
+        "/v1/download",
+        json={"message_id": "msg1", "filename": "README"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["status"] == "error"
+
+
+def test_download_attachment_not_found_returns_404(client):
+    with patch(
+        "app.main.get_email_attachments",
+        new_callable=AsyncMock,
+        return_value=[{"name": "other.txt", "blobId": "blob1", "type": "text/plain"}],
+    ):
+        resp = client.post(
+            "/v1/download",
+            json={"message_id": "msg1", "filename": "missing.txt"},
+            headers=AUTH,
+        )
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["status"] == "error"
+    assert "missing.txt" in body["message"]
+
+
+def test_download_success_returns_base64_data(client):
+    import base64
+
+    file_bytes = b"Hello, world!"
+    with (
+        patch(
+            "app.main.get_email_attachments",
+            new_callable=AsyncMock,
+            return_value=[{"name": "hello.txt", "blobId": "blob-abc", "type": "text/plain"}],
+        ),
+        patch(
+            "app.main.download_blob",
+            new_callable=AsyncMock,
+            return_value=file_bytes,
+        ),
+    ):
+        resp = client.post(
+            "/v1/download",
+            json={"message_id": "msg1", "filename": "hello.txt"},
+            headers=AUTH,
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["filename"] == "hello.txt"
+    assert body["content_type"] == "text/plain"
+    assert body["size"] == len(file_bytes)
+    assert base64.b64decode(body["data"]) == file_bytes
+
+
+def test_download_allowed_extensions(client):
+    """All extensions in ALLOWED_EXTENSIONS must pass the extension check."""
+    from app.main import ALLOWED_EXTENSIONS
+
+    file_bytes = b"data"
+    for ext in ALLOWED_EXTENSIONS:
+        filename = f"file{ext}"
+        with (
+            patch(
+                "app.main.get_email_attachments",
+                new_callable=AsyncMock,
+                return_value=[{"name": filename, "blobId": "blob1", "type": "application/octet-stream"}],
+            ),
+            patch(
+                "app.main.download_blob",
+                new_callable=AsyncMock,
+                return_value=file_bytes,
+            ),
+        ):
+            resp = client.post(
+                "/v1/download",
+                json={"message_id": "msg1", "filename": filename},
+                headers=AUTH,
+            )
+        assert resp.status_code == 200, f"Expected 200 for extension {ext}, got {resp.status_code}"
+
+
+def test_download_propagates_502_on_attachment_fetch_error(client):
+    with patch(
+        "app.main.get_email_attachments",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("JMAP error"),
+    ):
+        resp = client.post(
+            "/v1/download",
+            json={"message_id": "msg1", "filename": "doc.docx"},
+            headers=AUTH,
+        )
+    assert resp.status_code == 502
+
+
+def test_download_propagates_502_on_blob_download_error(client):
+    with (
+        patch(
+            "app.main.get_email_attachments",
+            new_callable=AsyncMock,
+            return_value=[{"name": "doc.docx", "blobId": "blob1", "type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}],
+        ),
+        patch(
+            "app.main.download_blob",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("Download failed"),
+        ),
+    ):
+        resp = client.post(
+            "/v1/download",
+            json={"message_id": "msg1", "filename": "doc.docx"},
+            headers=AUTH,
+        )
+    assert resp.status_code == 502
+
+
+def test_download_empty_attachment_list_returns_404(client):
+    with patch(
+        "app.main.get_email_attachments",
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        resp = client.post(
+            "/v1/download",
+            json={"message_id": "msg1", "filename": "report.pdf"},
+            headers=AUTH,
+        )
+    assert resp.status_code == 404

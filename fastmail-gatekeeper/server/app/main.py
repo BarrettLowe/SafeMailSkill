@@ -1,8 +1,10 @@
+import base64
 import logging
 import os
 import random
 import sys
 from contextlib import asynccontextmanager
+from pathlib import PurePosixPath
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
@@ -12,7 +14,9 @@ from .auth import require_api_key
 from .config import check_startup_config, settings
 from .jmap_client import (
     create_draft,
+    download_blob,
     find_draft_by_pin,
+    get_email_attachments,
     get_session,
     jmap_call,
     move_to_folder,
@@ -21,11 +25,25 @@ from .jmap_client import (
 from .ntfy import send_ntfy_notification
 from .policy import enforce_policy
 from .sanitize import sanitize_body, sanitize_subject
-from .schemas import ApproveRequest, DeleteRequest, JMAPProxyRequest, SendRequest
+from .schemas import ApproveRequest, DeleteRequest, DownloadRequest, JMAPProxyRequest, SendRequest
 
 logger = logging.getLogger(__name__)
 
 _SEP = "=" * 70
+
+# File extensions that may be downloaded from email attachments.
+# Extensions not in this set are refused with a 400 error.
+ALLOWED_EXTENSIONS: frozenset[str] = frozenset({
+    ".txt",       # plain text
+    ".md",        # Markdown
+    ".markdown",  # Markdown (alternate extension)
+    ".doc",       # Word 97-2003
+    ".docx",      # Word 2007+
+    ".odt",       # OpenDocument Text
+    ".rtf",       # Rich Text Format
+    ".csv",       # Comma-separated values
+    ".pdf",       # PDF
+})
 
 # Mailboxes permanently hidden from the agent — cannot be overridden by env config.
 _ALWAYS_HIDDEN_ROLES: frozenset[str] = frozenset({"trash"})
@@ -287,6 +305,82 @@ async def approve_email(req: ApproveRequest):
         raise HTTPException(status_code=502, detail=str(exc))
 
     return {"status": "sent"}
+
+
+@app.post("/v1/download", dependencies=[Depends(require_api_key)])
+async def download_attachment(req: DownloadRequest):
+    """
+    Download a single attachment from a message, subject to an extension allow-list.
+
+    **Allowed extensions**: .txt .md .markdown .doc .docx .odt .rtf .csv .pdf
+
+    Returns a JSON payload with the file contents base64-encoded in the `data` field.
+    Returns 400 if the file extension is not permitted, 404 if the attachment is
+    not found in the message, and 502 on upstream Fastmail errors.
+    """
+    suffix = PurePosixPath(req.filename).suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        allowed = ", ".join(sorted(ALLOWED_EXTENSIONS))
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "message": (
+                    f"File type '{suffix or '(none)'}' is not permitted. "
+                    f"Allowed extensions: {allowed}"
+                ),
+            },
+        )
+
+    try:
+        attachments = await get_email_attachments(req.message_id)
+    except (httpx.HTTPStatusError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not fetch attachment list: {exc}",
+        )
+
+    attachment = next(
+        (a for a in attachments if a.get("name") == req.filename),
+        None,
+    )
+    if attachment is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "status": "error",
+                "message": (
+                    f"Attachment '{req.filename}' was not found in message "
+                    f"'{req.message_id}'. "
+                    "Use Email/get with the 'attachments' property to list available attachments."
+                ),
+            },
+        )
+
+    blob_id: str = attachment.get("blobId", "")
+    content_type: str = attachment.get("type", "application/octet-stream")
+
+    if not blob_id:
+        raise HTTPException(
+            status_code=502,
+            detail="Attachment metadata is missing a blobId — cannot download",
+        )
+
+    try:
+        data = await download_blob(blob_id, req.filename, content_type)
+    except (httpx.HTTPStatusError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not download attachment: {exc}",
+        )
+
+    return {
+        "status": "ok",
+        "filename": req.filename,
+        "content_type": content_type,
+        "size": len(data),
+        "data": base64.b64encode(data).decode("ascii"),
+    }
 
 
 # ── Generic JMAP proxy ────────────────────────────────────────────────────────
