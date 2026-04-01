@@ -48,6 +48,21 @@ python scripts/gatekeeper.py get-thread <thread_id>
 The plain-text body is at `bodyValues[textBody[0].partId].value`.
 
 ```
+python scripts/gatekeeper.py list-attachments <message_id>
+```
+Returns `[{blobId, name, type, size, disposition}]` for every attachment in the message.
+
+```
+python scripts/gatekeeper.py download <message_id> <filename> [--save PATH]
+```
+Downloads `filename` from the message and returns a JSON payload with the file
+contents base64-encoded in the `data` field.  Pass `--save PATH` to write the
+decoded bytes directly to disk instead.
+
+**Allowed extensions**: `.txt` `.md` `.markdown` `.doc` `.docx` `.odt` `.rtf`
+`.csv` `.pdf`.  Any other extension is refused with a 400 error.
+
+```
 python scripts/gatekeeper.py trash   <message_id>     # moves to ai_trash
 python scripts/gatekeeper.py move    <message_id> <mailbox_id>
 python scripts/gatekeeper.py mark-read   <message_id>
@@ -70,6 +85,7 @@ python scripts/gatekeeper.py approve <pin>
 
 | Code | Meaning |
 |------|---------|
+| 400  | Bad request (e.g. file extension not permitted) |
 | 401  | Missing or invalid API key |
 | 403  | Blocked JMAP method |
 | 404  | PIN or message not found |

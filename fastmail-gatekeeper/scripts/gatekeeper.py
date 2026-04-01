@@ -13,6 +13,8 @@ Commands:
                                  [--subject TEXT] [--unread] [--after ISO] [--before ISO]
     get-email       <message_id>
     get-thread      <thread_id>
+    list-attachments <message_id>
+    download        <message_id> <filename> [--save PATH]
     trash           <message_id>
     move            <message_id> <mailbox_name>
     mark-read       <message_id>
@@ -24,6 +26,7 @@ Commands:
 """
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -142,6 +145,34 @@ def cmd_get_thread(args):
     print(json.dumps(emails, indent=2))
 
 
+def cmd_list_attachments(args):
+    result = _jmap([
+        ["Email/get", {
+            "ids": [args.message_id],
+            "properties": ["attachments"],
+        }, "c1"],
+    ])
+    emails = result["methodResponses"][0][1].get("list", [])
+    attachments = emails[0].get("attachments") or [] if emails else []
+    print(json.dumps(attachments, indent=2))
+
+
+def cmd_download(args):
+    result = _request("POST", "/v1/download", {
+        "message_id": args.message_id,
+        "filename":   args.filename,
+    })
+    if args.save and result.get("data"):
+        raw = base64.b64decode(result["data"])
+        with open(args.save, "wb") as fh:
+            fh.write(raw)
+        summary = {k: v for k, v in result.items() if k != "data"}
+        summary["saved_to"] = args.save
+        print(json.dumps(summary, indent=2))
+    else:
+        print(json.dumps(result, indent=2))
+
+
 def cmd_trash(args):
     result = _request("POST", "/v1/delete", {"message_id": args.message_id})
     print(json.dumps(result, indent=2))
@@ -216,6 +247,15 @@ def main():
     gt = sub.add_parser("get-thread")
     gt.add_argument("thread_id")
 
+    la = sub.add_parser("list-attachments")
+    la.add_argument("message_id")
+
+    dl = sub.add_parser("download")
+    dl.add_argument("message_id")
+    dl.add_argument("filename")
+    dl.add_argument("--save", dest="save", default=None, metavar="PATH",
+                    help="Save decoded file to PATH instead of printing base64 JSON")
+
     tr = sub.add_parser("trash")
     tr.add_argument("message_id")
 
@@ -237,18 +277,20 @@ def main():
 
     args = p.parse_args()
     dispatch = {
-        "list-mailboxes": cmd_list_mailboxes,
-        "list-emails":    cmd_list_emails,
-        "get-email":      cmd_get_email,
-        "get-thread":     cmd_get_thread,
-        "trash":          cmd_trash,
-        "move":           cmd_move,
-        "mark-read":      cmd_mark_read,
-        "mark-unread":    cmd_mark_unread,
-        "flag":           cmd_flag,
-        "unflag":         cmd_unflag,
-        "send":           cmd_send,
-        "approve":        cmd_approve,
+        "list-mailboxes":    cmd_list_mailboxes,
+        "list-emails":       cmd_list_emails,
+        "get-email":         cmd_get_email,
+        "get-thread":        cmd_get_thread,
+        "list-attachments":  cmd_list_attachments,
+        "download":          cmd_download,
+        "trash":             cmd_trash,
+        "move":              cmd_move,
+        "mark-read":         cmd_mark_read,
+        "mark-unread":       cmd_mark_unread,
+        "flag":              cmd_flag,
+        "unflag":            cmd_unflag,
+        "send":              cmd_send,
+        "approve":           cmd_approve,
     }
     dispatch[args.command](args)
 

@@ -24,6 +24,11 @@ class ApproveRequest(BaseModel):
         return v
 
 
+class DownloadRequest(BaseModel):
+    message_id: str
+    filename: str
+
+
 class JMAPProxyRequest(BaseModel):
     methodCalls: list[list[Any]]
 
