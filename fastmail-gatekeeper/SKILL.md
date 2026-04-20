@@ -27,10 +27,10 @@ the environment and always prints JSON to stdout. Errors go to stderr with an
 ```
 python scripts/gatekeeper.py list-mailboxes
 ```
-Returns `[{id, name, role, totalEmails, unreadEmails}]` sorted by role then name.
+Returns `[{name, role, totalEmails, unreadEmails}]` sorted by role then name.
 
 ```
-python scripts/gatekeeper.py list-emails <mailbox_id> [options]
+python scripts/gatekeeper.py list-emails <mailbox_name> [options]
   --limit N        default 20
   --search TEXT    full-text across all fields
   --from ADDR      sender partial match
@@ -39,6 +39,8 @@ python scripts/gatekeeper.py list-emails <mailbox_id> [options]
   --after  ISO     e.g. 2026-01-01T00:00:00Z
   --before ISO
 ```
+Mailbox names are resolved to internal Fastmail IDs automatically (for example,
+`Receipts`).
 
 ```
 python scripts/gatekeeper.py get-email  <message_id>
@@ -64,7 +66,7 @@ decoded bytes directly to disk instead.
 
 ```
 python scripts/gatekeeper.py trash   <message_id>     # moves to ai_trash
-python scripts/gatekeeper.py move    <message_id> <mailbox_id>
+python scripts/gatekeeper.py move    <message_id> <mailbox_name>
 python scripts/gatekeeper.py mark-read   <message_id>
 python scripts/gatekeeper.py mark-unread <message_id>
 python scripts/gatekeeper.py flag        <message_id>
