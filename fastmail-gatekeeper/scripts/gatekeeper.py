@@ -35,6 +35,7 @@ import urllib.request
 
 BASE_URL = os.environ.get("GATEKEEPER_BASE_URL", "http://127.0.0.1:8080")
 API_KEY  = os.environ.get("GATEKEEPER_API_KEY", "")
+_mailbox_lookup_cache: dict[str, str] | None = None
 
 
 def _headers():
@@ -69,6 +70,29 @@ def _jmap(method_calls: list) -> dict:
     return _request("POST", "/v1/jmap", {"methodCalls": method_calls})
 
 
+def _mailbox_name_to_id() -> dict[str, str]:
+    global _mailbox_lookup_cache
+    if _mailbox_lookup_cache is not None:
+        return _mailbox_lookup_cache
+
+    lookup: dict[str, str] = {}
+    mailboxes = _request("GET", "/v1/mailboxes")
+    for mailbox in mailboxes:
+        mailbox_id = mailbox.get("id")
+        mailbox_name = mailbox.get("name")
+        if mailbox_id and mailbox_name:
+            lookup[mailbox_name.lower()] = mailbox_id
+
+    _mailbox_lookup_cache = lookup
+    return lookup
+
+
+def _resolve_mailbox_id(mailbox_name: str | None) -> str | None:
+    if mailbox_name is None:
+        return None
+    return _mailbox_name_to_id().get(mailbox_name.lower(), mailbox_name)
+
+
 def _die(msg: str):
     print(json.dumps({"error": msg}), file=sys.stderr)
     sys.exit(1)
@@ -88,7 +112,8 @@ def cmd_list_mailboxes(_args):
 
 def cmd_list_emails(args):
     filt: dict = {}
-    if args.mailbox_name: filt["inMailbox"] = args.mailbox_name
+    mailbox_id = _resolve_mailbox_id(args.mailbox_name)
+    if mailbox_id: filt["inMailbox"] = mailbox_id
     if args.search:       filt["text"]      = args.search
     if args.from_:    filt["from"]        = args.from_
     if args.subject:  filt["subject"]     = args.subject
@@ -179,11 +204,14 @@ def cmd_trash(args):
 
 
 def cmd_move(args):
+    mailbox_id = _resolve_mailbox_id(args.mailbox_name)
+    if not mailbox_id:
+        _die("mailbox_name is required")
     result = _jmap([
         ["Email/set", {
             "update": {
                 args.message_id: {
-                    "mailboxIds": {args.mailbox_name: True}
+                    "mailboxIds": {mailbox_id: True}
                 }
             }
         }, "c1"],
