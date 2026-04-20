@@ -37,11 +37,11 @@ def test_resolve_mailbox_name_to_id_falls_back_to_input(monkeypatch):
 
 def test_cmd_list_emails_resolves_mailbox_name_before_query(monkeypatch):
     gatekeeper = _load_gatekeeper_module()
-    captured: dict = {}
+    jmap_calls: dict = {}
     monkeypatch.setattr(gatekeeper, "_resolve_mailbox_id", lambda name: "mbx-456")
 
     def fake_jmap(method_calls):
-        captured["method_calls"] = method_calls
+        jmap_calls["method_calls"] = method_calls
         return {"methodResponses": [["Email/query", {"ids": []}, "c1"], ["Email/get", {"list": []}, "c2"]]}
 
     monkeypatch.setattr(gatekeeper, "_jmap", fake_jmap)
@@ -57,22 +57,22 @@ def test_cmd_list_emails_resolves_mailbox_name_before_query(monkeypatch):
     )
     gatekeeper.cmd_list_emails(args)
 
-    forwarded_filter = captured["method_calls"][0][1]["filter"]
+    forwarded_filter = jmap_calls["method_calls"][0][1]["filter"]
     assert forwarded_filter["inMailbox"] == "mbx-456"
 
 
 def test_cmd_move_resolves_mailbox_name_before_update(monkeypatch):
     gatekeeper = _load_gatekeeper_module()
-    captured: dict = {}
+    jmap_calls: dict = {}
     monkeypatch.setattr(gatekeeper, "_resolve_mailbox_id", lambda name: "mbx-789")
 
     def fake_jmap(method_calls):
-        captured["method_calls"] = method_calls
+        jmap_calls["method_calls"] = method_calls
         return {"methodResponses": [["Email/set", {"updated": {"msg-1": None}}, "c1"]]}
 
     monkeypatch.setattr(gatekeeper, "_jmap", fake_jmap)
     args = SimpleNamespace(message_id="msg-1", mailbox_name="Receipts")
     gatekeeper.cmd_move(args)
 
-    mailbox_ids = captured["method_calls"][0][1]["update"]["msg-1"]["mailboxIds"]
+    mailbox_ids = jmap_calls["method_calls"][0][1]["update"]["msg-1"]["mailboxIds"]
     assert mailbox_ids == {"mbx-789": True}

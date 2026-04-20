@@ -205,6 +205,8 @@ def cmd_trash(args):
 
 def cmd_move(args):
     mailbox_id = _resolve_mailbox_id(args.mailbox_name)
+    if not mailbox_id:
+        _die("mailbox_name is required")
     result = _jmap([
         ["Email/set", {
             "update": {
