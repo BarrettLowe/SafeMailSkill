@@ -82,6 +82,7 @@ async def get_session() -> dict[str, Any]:
             "download_url": download_url,
             "account_id": account_id,
             "submit_account_id": submit_account_id,
+            "identity_id": primary["id"] if primary else None,
             "from_email": primary["email"] if primary else None,
             "from_name": primary.get("name", "") if primary else "",
             "ready": True,
@@ -238,6 +239,9 @@ async def find_draft_by_pin(pin: str) -> str | None:
 async def submit_email(message_id: str) -> None:
     """Submit a draft via EmailSubmission/set (actual send)."""
     session = await get_session()
+    identity_id = session.get("identity_id")
+    if not identity_id:
+        raise RuntimeError("No sending identity configured — cannot submit email")
     result = await jmap_call(
         [
             [
@@ -247,6 +251,7 @@ async def submit_email(message_id: str) -> None:
                     "create": {
                         "sub1": {
                             "emailId": message_id,
+                            "identityId": identity_id,
                             "envelope": None,  # derived from email From/To headers
                         }
                     },
